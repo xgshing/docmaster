@@ -1,7 +1,9 @@
 <script setup lang="ts">
-import { computed, defineComponent, h, onMounted, reactive, ref } from 'vue'
+import { computed, defineComponent, h, onMounted, reactive, ref, watch } from 'vue'
 
 type Role = 'user' | 'admin' | 'super_admin'
+type SpaceKey = 'personal' | 'shared'
+type MenuKey = 'personal' | 'shared' | 'recycle' | 'archive' | 'admin'
 
 interface User {
   id: number
@@ -10,145 +12,246 @@ interface User {
 }
 
 interface DashboardSnapshot {
-  storage: {
-    onlyoffice_url: string
-  }
+  storage: { onlyoffice_url: string }
 }
 
-interface SharedTreeNodeRaw {
+interface TreeNodeRaw {
   id: number
   kind: 'folder' | 'document'
   name: string
   parent: number | null
   permission?: string
   file_type?: string
-  file_size?: number
 }
 
-interface SharedTreeResponse {
-  roots: SharedTreeNodeRaw[]
-  children: Record<string, SharedTreeNodeRaw[]>
+interface TreeResponse {
+  roots: TreeNodeRaw[]
+  children: Record<string, TreeNodeRaw[]>
 }
 
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '').trim()
-
-const auth = reactive({
-  access: localStorage.getItem('docmaster.access') || '',
-  refresh: localStorage.getItem('docmaster.refresh') || '',
-})
-
+const auth = reactive({ access: localStorage.getItem('docmaster.access') || '', refresh: localStorage.getItem('docmaster.refresh') || '' })
 const user = ref<User | null>(null)
 const dashboard = ref<DashboardSnapshot | null>(null)
 const loginForm = reactive({ username: '', password: '' })
 const loginError = ref('')
 const loginSubmitting = ref(false)
 
-const sharedTree = ref<SharedTreeResponse>({ roots: [], children: {} })
-const sharedLoading = ref(false)
-const sharedError = ref('')
+const activeMenu = ref<MenuKey>('personal')
+const trees = reactive<Record<SpaceKey, TreeResponse>>({
+  personal: { roots: [], children: {} },
+  shared: { roots: [], children: {} },
+})
+const treeLoading = ref(false)
+const treeError = ref('')
+const expandedFolders = ref<Record<string, boolean>>({})
+const selectedDoc = ref<{ id: number; space: SpaceKey; name: string; fileType?: string } | null>(null)
+const rightPaneError = ref('')
+const onlyOfficeHostId = 'onlyoffice-host'
+let currentEditor: any = null
 
-const active = ref<'shared' | 'admin'>('shared')
+const contextMenu = reactive({
+  visible: false,
+  x: 0,
+  y: 0,
+  space: 'personal' as SpaceKey,
+  node: null as TreeNodeRaw | null,
+})
+
+const uploadState = reactive({
+  visible: false,
+  space: 'personal' as SpaceKey,
+  folderId: null as number | null,
+})
+const uploadInput = ref<HTMLInputElement | null>(null)
+
+const isAdminLike = computed(() => user.value?.role === 'admin' || user.value?.role === 'super_admin')
+const activeSpace = computed<SpaceKey | null>(() => (activeMenu.value === 'personal' || activeMenu.value === 'shared' ? activeMenu.value : null))
+const activeTree = computed(() => (activeSpace.value ? trees[activeSpace.value] : { roots: [], children: {} }))
 
 function apiUrl(pathname: string) {
   const base = API_BASE_URL || window.location.origin
   return `${base}${pathname}`
 }
 
-async function apiRequest<T>(pathname: string, options: { method?: string; body?: any; isForm?: boolean } = {}) {
-  const method = options.method || 'GET'
+function safeJson(text: string) {
+  try { return JSON.parse(text) } catch { return text }
+}
 
-  async function doFetch(withAccessToken: boolean) {
+async function apiRequest<T>(pathname: string, options: { method?: string; body?: any } = {}) {
+  const method = options.method || 'GET'
+  async function doFetch() {
     const headers: Record<string, string> = {}
     let body: BodyInit | undefined
-
-    if (withAccessToken && auth.access) {
-      headers.Authorization = `Bearer ${auth.access}`
-    }
-
-    if (options.body instanceof FormData) {
-      body = options.body
-    } else if (options.body !== undefined) {
-      headers['Content-Type'] = 'application/json'
-      body = JSON.stringify(options.body)
-    }
-
+    if (auth.access) headers.Authorization = `Bearer ${auth.access}`
+    if (options.body instanceof FormData) body = options.body
+    else if (options.body !== undefined) { headers['Content-Type'] = 'application/json'; body = JSON.stringify(options.body) }
     const res = await fetch(apiUrl(pathname), { method, headers, body })
     const text = await res.text()
     const data = text ? safeJson(text) : null
     return { res, text, data }
   }
-
   async function refreshAccessToken() {
     if (!auth.refresh) return false
-    try {
-      const res = await fetch(apiUrl('/api/accounts/token/refresh/'), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ refresh: auth.refresh }),
-      })
-      const payload = await res.json().catch(() => null)
-      if (!res.ok || !payload?.access) return false
-      auth.access = String(payload.access)
-      localStorage.setItem('docmaster.access', auth.access)
-      return true
-    } catch {
-      return false
-    }
+    const res = await fetch(apiUrl('/api/accounts/token/refresh/'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refresh: auth.refresh }),
+    })
+    const payload = await res.json().catch(() => null)
+    if (!res.ok || !payload?.access) return false
+    auth.access = String(payload.access)
+    localStorage.setItem('docmaster.access', auth.access)
+    return true
   }
 
-  let attempt = 0
-  while (attempt < 2) {
-    const { res, text, data } = await doFetch(true)
-
-    if (res.status === 401 && attempt === 0) {
-      const refreshed = await refreshAccessToken()
-      if (refreshed) {
-        attempt += 1
-        continue
-      }
-      // Token invalid / kicked.
-      auth.access = ''
-      auth.refresh = ''
-      localStorage.removeItem('docmaster.access')
-      localStorage.removeItem('docmaster.refresh')
-      user.value = null
-    }
-
-    if (!res.ok) {
-      const msg = (data && (data.detail || data.message)) || text || '请求失败'
-      throw new Error(typeof msg === 'string' ? msg : '请求失败')
-    }
+  for (let i = 0; i < 2; i += 1) {
+    const { res, text, data } = await doFetch()
+    if (res.status === 401 && i === 0 && await refreshAccessToken()) continue
+    if (!res.ok) throw new Error((data && (data.detail || data.message)) || text || '请求失败')
     return data as T
   }
-
   throw new Error('请求失败')
 }
 
-function safeJson(text: string) {
+async function loadMe() { user.value = await apiRequest<User>('/api/accounts/me/') }
+async function loadDashboard() { dashboard.value = await apiRequest<DashboardSnapshot>('/api/documents/dashboard/') }
+
+async function loadTree(space: SpaceKey) {
+  const result = await apiRequest<TreeResponse>(`/api/documents/tree/?space_type=${space}`)
+  trees[space] = result
+}
+
+async function reloadTrees() {
+  treeLoading.value = true
+  treeError.value = ''
   try {
-    return JSON.parse(text)
-  } catch {
-    return text
+    await Promise.all([loadTree('personal'), loadTree('shared')])
+  } catch (e) {
+    treeError.value = (e as Error).message
+  } finally {
+    treeLoading.value = false
   }
 }
 
-async function loadMe() {
-  user.value = await apiRequest<User>('/api/accounts/me/')
+function canManage(space: SpaceKey) {
+  if (!user.value) return false
+  return space === 'personal' ? true : isAdminLike.value
 }
 
-async function loadDashboard() {
-  dashboard.value = await apiRequest<DashboardSnapshot>('/api/documents/dashboard/')
+function toggleFolder(node: TreeNodeRaw) {
+  const key = `${activeSpace.value}:${node.id}`
+  expandedFolders.value[key] = !expandedFolders.value[key]
 }
 
-async function loadSharedTree() {
-  sharedLoading.value = true
-  sharedError.value = ''
+function openDocument(node: TreeNodeRaw, space: SpaceKey) {
+  if (node.kind !== 'document') return
+  selectedDoc.value = { id: node.id, space, name: node.name, fileType: node.file_type }
+  window.location.hash = `#/onlyoffice/${node.id}`
+}
+
+function openDocumentInNewWindow() {
+  if (!selectedDoc.value) return
+  const url = `${window.location.origin}${import.meta.env.BASE_URL}#/onlyoffice/${selectedDoc.value.id}`
+  window.open(url, '_blank', 'noopener,noreferrer')
+}
+
+function closeContextMenu() { contextMenu.visible = false }
+
+function onNodeContextmenu(e: MouseEvent, node: TreeNodeRaw, space: SpaceKey) {
+  e.preventDefault()
+  contextMenu.visible = true
+  contextMenu.x = e.clientX
+  contextMenu.y = e.clientY
+  contextMenu.node = node
+  contextMenu.space = space
+}
+
+async function createFolder(parentId?: number) {
+  const space = contextMenu.space
+  if (!canManage(space)) return
+  const name = window.prompt('请输入新建目录名称')
+  if (!name?.trim()) return
+  await apiRequest('/api/documents/folders/', {
+    method: 'POST',
+    body: { name: name.trim(), parent: parentId || null, space_type: space },
+  })
+  closeContextMenu()
+  await loadTree(space)
+}
+
+async function renameFolder() {
+  const node = contextMenu.node
+  if (!node || node.kind !== 'folder') return
+  const name = window.prompt('请输入新的目录名称', node.name)
+  if (!name?.trim() || name.trim() === node.name) return
+  await apiRequest(`/api/documents/folders/${node.id}/`, { method: 'PATCH', body: { name: name.trim() } })
+  closeContextMenu()
+  await loadTree(contextMenu.space)
+}
+
+async function deleteFolder() {
+  const node = contextMenu.node
+  if (!node || node.kind !== 'folder') return
+  if (!window.confirm(`确认删除目录 "${node.name}" 吗？`)) return
+  await apiRequest(`/api/documents/folders/${node.id}/delete/`, { method: 'POST' })
+  closeContextMenu()
+  await loadTree(contextMenu.space)
+}
+
+async function deleteDocument() {
+  const node = contextMenu.node
+  if (!node || node.kind !== 'document') return
+  if (!window.confirm(`确认删除文件 "${node.name}" 吗？`)) return
+  await apiRequest(`/api/documents/documents/${node.id}/delete/`, { method: 'POST' })
+  closeContextMenu()
+  await loadTree(contextMenu.space)
+}
+
+function triggerUpload() {
+  if (!contextMenu.node || contextMenu.node.kind !== 'folder') return
+  uploadState.visible = true
+  uploadState.space = contextMenu.space
+  uploadState.folderId = contextMenu.node.id
+  closeContextMenu()
+  requestAnimationFrame(() => uploadInput.value?.click())
+}
+
+async function onFilePicked(e: Event) {
+  const target = e.target as HTMLInputElement
+  const file = target.files?.[0]
+  if (!file || !uploadState.folderId) return
+  const form = new FormData()
+  form.append('file', file)
+  form.append('folder', String(uploadState.folderId))
+  form.append('space_type', uploadState.space)
+  await apiRequest('/api/documents/documents/upload/', { method: 'POST', body: form })
+  target.value = ''
+  await loadTree(uploadState.space)
+}
+
+async function loadOnlyOfficeInline() {
+  rightPaneError.value = ''
+  if (!selectedDoc.value) return
   try {
-    sharedTree.value = await apiRequest<SharedTreeResponse>('/api/documents/tree/')
+    const onlyOfficeUrl = dashboard.value?.storage?.onlyoffice_url
+    if (!onlyOfficeUrl) throw new Error('OnlyOffice 地址未配置')
+    const scriptUrl = `${onlyOfficeUrl.replace(/\/+$/, '')}/web-apps/apps/api/documents/api.js`
+    if (!(window as any).DocsAPI?.DocEditor) {
+      await new Promise<void>((resolve, reject) => {
+        const el = document.createElement('script')
+        el.src = scriptUrl
+        el.async = true
+        el.onload = () => resolve()
+        el.onerror = () => reject(new Error('OnlyOffice 脚本加载失败'))
+        document.head.appendChild(el)
+      })
+    }
+    const config = await apiRequest(`/api/documents/documents/${selectedDoc.value.id}/onlyoffice-config/`)
+    if (currentEditor?.destroyEditor) currentEditor.destroyEditor()
+    currentEditor = new (window as any).DocsAPI.DocEditor(onlyOfficeHostId, config)
   } catch (e) {
-    sharedError.value = (e as Error).message
-  } finally {
-    sharedLoading.value = false
+    rightPaneError.value = (e as Error).message
   }
 }
 
@@ -169,8 +272,7 @@ async function login() {
     localStorage.setItem('docmaster.access', auth.access)
     localStorage.setItem('docmaster.refresh', auth.refresh)
     user.value = result.user
-    loginForm.password = ''
-    await Promise.all([loadDashboard(), loadSharedTree()])
+    await Promise.all([loadDashboard(), reloadTrees()])
   } catch (e) {
     loginError.value = (e as Error).message
   } finally {
@@ -179,283 +281,203 @@ async function login() {
 }
 
 async function logout() {
+  try { await apiRequest('/api/accounts/logout/', { method: 'POST' }) } catch {}
+  auth.access = ''; auth.refresh = ''; user.value = null; selectedDoc.value = null
+  localStorage.removeItem('docmaster.access'); localStorage.removeItem('docmaster.refresh')
+}
+
+function parseDocIdFromHash(): number | null {
+  const m = window.location.hash.match(/^#\/onlyoffice\/(\d+)/)
+  return m ? Number(m[1]) : null
+}
+
+function syncSelectionFromHash() {
+  const id = parseDocIdFromHash()
+  if (!id) return
+  const allDocs = [...trees.personal.roots, ...Object.values(trees.personal.children).flat(), ...trees.shared.roots, ...Object.values(trees.shared.children).flat()]
+    .filter((n) => n.kind === 'document')
+  const doc = allDocs.find((n) => n.id === id)
+  if (doc) {
+    const inPersonal = [...trees.personal.roots, ...Object.values(trees.personal.children).flat()].some((n) => n.kind === 'document' && n.id === id)
+    selectedDoc.value = { id: doc.id, name: doc.name, fileType: doc.file_type, space: inPersonal ? 'personal' : 'shared' }
+  }
+}
+
+async function bootstrap() {
+  if (!auth.access) return
   try {
-    await apiRequest('/api/accounts/logout/', { method: 'POST' })
+    await Promise.all([loadMe(), loadDashboard(), reloadTrees()])
+    syncSelectionFromHash()
   } catch {
-    // ignore
-  } finally {
-    auth.access = ''
-    auth.refresh = ''
-    localStorage.removeItem('docmaster.access')
-    localStorage.removeItem('docmaster.refresh')
     user.value = null
   }
 }
 
-function canEdit(node: SharedTreeNodeRaw) {
-  return node.permission === 'edit' || user.value?.role === 'super_admin'
-}
+watch(selectedDoc, async () => {
+  if (selectedDoc.value) await loadOnlyOfficeInline()
+}, { deep: true })
 
-async function openOnlyOffice(docId: number) {
-  // Open in a new window (full page) to reduce embedding constraints.
-  const url = `${window.location.origin}${import.meta.env.BASE_URL}#/onlyoffice/${docId}`
-  window.open(url, '_blank', 'noopener,noreferrer')
-}
-
-const isOnlyOfficeRoute = computed(() => window.location.hash.startsWith('#/onlyoffice/'))
+onMounted(() => {
+  bootstrap()
+  document.addEventListener('click', closeContextMenu)
+  window.addEventListener('hashchange', syncSelectionFromHash)
+})
 
 const TreeNode = defineComponent({
   name: 'TreeNode',
   props: {
     node: { type: Object, required: true },
     childrenMap: { type: Object, required: true },
-    canEdit: { type: Function, required: true },
+    space: { type: String, required: true },
+    selectedDocId: { type: Number, required: false, default: 0 },
   },
-  emits: ['open-onlyoffice'],
+  emits: ['toggle', 'open-doc', 'node-contextmenu'],
   setup(props, { emit }) {
-    const expanded = ref(true)
-    const children = () => (props.childrenMap as any)[String((props.node as any).id)] || []
     return () => {
-      const n: any = props.node
+      const n = props.node as TreeNodeRaw
       const isFolder = n.kind === 'folder'
-      const label = isFolder ? `📁 ${n.name}` : `📄 ${n.name}`
-      const canOpen = !isFolder && (n.file_type === 'word' || n.file_type === 'excel' || n.file_type === 'ppt')
+      const children = (props.childrenMap as any)[String(n.id)] || []
+      const expanded = (expandedFolders.value as any)[`${props.space}:${n.id}`] ?? true
       return h('div', { class: 'tree-node' }, [
-        h(
-          'div',
-          { class: 'tree-line' },
-          [
-            isFolder
-              ? h(
-                  'button',
-                  { class: 'icon-btn', onClick: () => (expanded.value = !expanded.value), title: '展开/收起' },
-                  expanded.value ? '▾' : '▸',
-                )
-              : h('span', { class: 'icon-placeholder' }, ''),
-            h('span', { class: 'tree-label' }, label),
-            canOpen
-              ? h(
-                  'button',
-                  { class: 'btn small', onClick: () => emit('open-onlyoffice', n.id) },
-                  '在线打开',
-                )
-              : null,
-          ].filter(Boolean),
-        ),
-        isFolder && expanded.value
-          ? h(
-              'div',
-              { class: 'tree-children' },
-              children().map((c: any) =>
-                h(TreeNode as any, {
-                  node: c,
-                  childrenMap: props.childrenMap,
-                  canEdit: props.canEdit,
-                  onOpenOnlyoffice: (id: number) => emit('open-onlyoffice', id),
-                }),
-              ),
-            )
+        h('div', {
+          class: ['tree-line', n.kind === 'document' && props.selectedDocId === n.id ? 'active' : ''],
+          onClick: () => (isFolder ? emit('toggle', n) : emit('open-doc', n, props.space)),
+          onContextmenu: (e: MouseEvent) => emit('node-contextmenu', e, n, props.space),
+        }, [
+          h('span', { class: 'arrow' }, isFolder ? (expanded ? '▾' : '▸') : ''),
+          h('span', { class: 'name' }, `${isFolder ? '📁' : '📄'} ${n.name}`),
+        ]),
+        isFolder && expanded
+          ? h('div', { class: 'tree-children' }, children.map((c: any) =>
+            h(TreeNode as any, {
+              node: c, childrenMap: props.childrenMap, space: props.space, selectedDocId: props.selectedDocId,
+              onToggle: (item: TreeNodeRaw) => emit('toggle', item),
+              onOpenDoc: (item: TreeNodeRaw, s: SpaceKey) => emit('open-doc', item, s),
+              onNodeContextmenu: (evt: MouseEvent, item: TreeNodeRaw, s: SpaceKey) => emit('node-contextmenu', evt, item, s),
+            })))
           : null,
       ])
     }
   },
-})
-
-const OnlyOfficePage = defineComponent({
-  name: 'OnlyOfficePage',
-  props: {
-    dashboard: { type: Object, required: false, default: null },
-    apiRequest: { type: Function, required: true },
-  },
-  setup(props) {
-    const error = ref('')
-    const hostId = 'onlyoffice-host'
-
-    function currentDocId(): number | null {
-      const match = window.location.hash.match(/^#\/onlyoffice\/(\d+)/)
-      return match ? Number(match[1]) : null
-    }
-
-    async function ensureDocsApi(onlyOfficeUrl: string) {
-      if ((window as any).DocsAPI?.DocEditor) return
-      const scriptUrl = `${onlyOfficeUrl.replace(/\/+$/, '')}/web-apps/apps/api/documents/api.js`
-      await new Promise<void>((resolve, reject) => {
-        const el = document.createElement('script')
-        el.src = scriptUrl
-        el.async = true
-        el.onload = () => resolve()
-        el.onerror = () => reject(new Error('OnlyOffice 脚本加载失败'))
-        document.head.appendChild(el)
-      })
-    }
-
-    onMounted(async () => {
-      const docId = currentDocId()
-      if (!docId) {
-        error.value = '无效的文档 ID'
-        return
-      }
-      try {
-        const dash = (props.dashboard as any) || (await (props.apiRequest as any)('/api/documents/dashboard/'))
-        const onlyOfficeUrl = dash?.storage?.onlyoffice_url
-        if (!onlyOfficeUrl) {
-          throw new Error('OnlyOffice 地址未配置')
-        }
-        const config = await (props.apiRequest as any)(`/api/documents/documents/${docId}/onlyoffice-config/`)
-        await ensureDocsApi(onlyOfficeUrl)
-        const DocsAPI = (window as any).DocsAPI
-        new DocsAPI.DocEditor(hostId, config)
-      } catch (e) {
-        error.value = (e as Error).message
-      }
-    })
-
-    return () =>
-      h('div', { class: 'onlyoffice-shell' }, [
-        h('div', { class: 'onlyoffice-top' }, [
-          h('a', { href: `${(import.meta as any).env.BASE_URL}#/`, class: 'link' }, '← 返回'),
-          h('div', { class: 'spacer' }),
-        ]),
-        error.value ? h('div', { class: 'error' }, error.value) : null,
-        h('div', { id: hostId, class: 'onlyoffice-host' }),
-      ])
-  },
-})
-
-async function bootstrap() {
-  if (!auth.access) {
-    return
-  }
-  try {
-    await Promise.all([loadMe(), loadDashboard(), loadSharedTree()])
-  } catch {
-    user.value = null
-  }
-}
-
-onMounted(() => {
-  bootstrap()
 })
 </script>
 
 <template>
   <div class="shell">
     <header class="topbar">
-      <div class="brand">DocMaster Web</div>
+      <div class="brand">DocMaster</div>
       <div class="spacer" />
       <template v-if="user">
-        <div class="user">
-          <span class="user-name">{{ user.username }}</span>
-          <span class="user-role">{{ user.role }}</span>
-        </div>
+        <div class="user">{{ user.username }} ({{ user.role }})</div>
         <button class="btn" @click="logout">退出</button>
       </template>
     </header>
 
     <main class="content">
-      <section v-if="!user" class="card login-card">
+      <section v-if="!user" class="login-card">
         <h2>登录</h2>
-        <div class="field">
-          <label>用户名</label>
-          <input v-model="loginForm.username" autocomplete="username" />
-        </div>
-        <div class="field">
-          <label>密码</label>
-          <input v-model="loginForm.password" type="password" autocomplete="current-password" @keyup.enter="login" />
-        </div>
+        <input v-model="loginForm.username" placeholder="用户名" />
+        <input v-model="loginForm.password" type="password" placeholder="密码" @keyup.enter="login" />
         <div v-if="loginError" class="error">{{ loginError }}</div>
-        <button class="btn primary" :disabled="loginSubmitting" @click="login">
-          {{ loginSubmitting ? '登录中…' : '登录' }}
-        </button>
-        <div class="hint" v-if="!API_BASE_URL">
-          需要配置 <code>VITE_API_BASE_URL</code> 指向你的后端（例如 <code>https://doc.yuntuxia.top</code>）。
-        </div>
+        <button class="btn primary" :disabled="loginSubmitting" @click="login">{{ loginSubmitting ? '登录中…' : '登录' }}</button>
       </section>
 
-      <section v-else-if="isOnlyOfficeRoute" class="onlyoffice-page">
-        <OnlyOfficePage :dashboard="dashboard || undefined" :api-request="apiRequest" />
-      </section>
-
-      <section v-else class="layout">
-        <aside class="sidebar card">
-          <button class="tab" :class="{ active: active === 'shared' }" @click="active = 'shared'">共享空间</button>
-          <button class="tab" :class="{ active: active === 'admin' }" @click="active = 'admin'">管理</button>
+      <section v-else class="workbench">
+        <aside class="left-nav">
+          <button class="nav-item" :class="{ active: activeMenu === 'personal' }" @click="activeMenu = 'personal'">个人文档库</button>
+          <button class="nav-item" :class="{ active: activeMenu === 'shared' }" @click="activeMenu = 'shared'">共享空间</button>
+          <button class="nav-item" :class="{ active: activeMenu === 'recycle' }" @click="activeMenu = 'recycle'">回收站</button>
+          <button class="nav-item muted" :class="{ active: activeMenu === 'archive' }" @click="activeMenu = 'archive'">归档视图（占位）</button>
+          <button class="nav-item muted" :class="{ active: activeMenu === 'admin' }" @click="activeMenu = 'admin'">管理中心（占位）</button>
         </aside>
 
-        <section class="main card">
-          <template v-if="active === 'shared'">
-            <div class="row">
-              <h2>共享空间</h2>
-              <div class="spacer" />
-              <button class="btn" :disabled="sharedLoading" @click="loadSharedTree">
-                {{ sharedLoading ? '加载中…' : '刷新' }}
-              </button>
-            </div>
-            <div v-if="sharedError" class="error">{{ sharedError }}</div>
-            <div v-if="sharedLoading" class="muted">正在加载目录…</div>
+        <section class="tree-pane">
+          <div class="pane-header">
+            <strong>{{ activeMenu === 'personal' ? '个人文档库' : activeMenu === 'shared' ? '共享空间' : '功能区' }}</strong>
+            <button v-if="activeSpace" class="btn small" @click="loadTree(activeSpace)">刷新</button>
+          </div>
+          <div v-if="treeError" class="error">{{ treeError }}</div>
+          <div v-if="!activeSpace" class="empty">该模块首版暂为占位。</div>
+          <div v-else-if="treeLoading" class="empty">目录加载中...</div>
+          <div v-else class="tree-list" @contextmenu.prevent="activeSpace && canManage(activeSpace) ? createFolder() : null">
+            <TreeNode
+              v-for="root in activeTree.roots"
+              :key="`${activeSpace}-${root.kind}-${root.id}`"
+              :node="root"
+              :children-map="activeTree.children"
+              :space="activeSpace"
+              :selected-doc-id="selectedDoc?.id || 0"
+              @toggle="toggleFolder"
+              @open-doc="openDocument"
+              @node-contextmenu="onNodeContextmenu"
+            />
+          </div>
+        </section>
 
-            <div v-else class="tree">
-              <TreeNode
-                v-for="root in sharedTree.roots"
-                :key="`${root.kind}-${root.id}`"
-                :node="root"
-                :children-map="sharedTree.children"
-                :can-edit="canEdit"
-                @open-onlyoffice="openOnlyOffice"
-              />
-            </div>
-          </template>
-
-          <template v-else>
-            <h2>管理</h2>
-            <div class="muted">
-              管理模块后续可按需要补齐（用户/分组/权限/回收站等），本次先完成 Web 化 + JWT + OnlyOffice 新窗口。
-            </div>
-          </template>
+        <section class="editor-pane">
+          <div class="pane-header">
+            <strong>{{ selectedDoc ? selectedDoc.name : '欢迎使用 DocMaster' }}</strong>
+            <button v-if="selectedDoc" class="btn small" @click="openDocumentInNewWindow">新窗口打开</button>
+          </div>
+          <div v-if="rightPaneError" class="error">{{ rightPaneError }}</div>
+          <div v-if="!selectedDoc" class="welcome">请选择左侧文件在此处打开（OnlyOffice 内嵌）。</div>
+          <div v-else-if="!['word', 'excel', 'ppt'].includes(selectedDoc.fileType || '')" class="welcome">该文件类型当前不支持在线编辑。</div>
+          <div v-else :id="onlyOfficeHostId" class="onlyoffice-host" />
         </section>
       </section>
     </main>
+
+    <div
+      v-if="contextMenu.visible && contextMenu.node && canManage(contextMenu.space)"
+      class="context-menu"
+      :style="{ left: `${contextMenu.x}px`, top: `${contextMenu.y}px` }"
+    >
+      <template v-if="contextMenu.node.kind === 'folder'">
+        <button class="menu-item" @click="createFolder(contextMenu.node.id)">新建文件夹</button>
+        <button class="menu-item" @click="triggerUpload">上传文件</button>
+        <button class="menu-item" @click="renameFolder">重命名</button>
+        <button class="menu-item danger" @click="deleteFolder">删除文件/文件夹</button>
+      </template>
+      <template v-else>
+        <button class="menu-item danger" @click="deleteDocument">删除文件</button>
+      </template>
+    </div>
+
+    <input ref="uploadInput" class="hidden-file" type="file" @change="onFilePicked" />
   </div>
- </template>
+</template>
 
 <style scoped>
-.shell { min-height: 100vh; background: #0b1020; color: #e6e9f2; }
-.topbar { display:flex; align-items:center; gap:12px; padding:14px 18px; border-bottom: 1px solid rgba(255,255,255,.08); }
-.brand { font-weight: 700; letter-spacing:.2px; }
+.shell { min-height: 100vh; background: #e8e0cf; color: #2f2a22; }
+.topbar { height: 56px; display: flex; align-items: center; gap: 12px; padding: 0 16px; background: #d9ceb8; border-bottom: 1px solid #c8baa0; }
+.brand { font-weight: 700; }
 .spacer { flex: 1; }
-.user { display:flex; gap:10px; align-items:center; opacity:.9; }
-.user-role { font-size: 12px; opacity:.75; }
-.content { padding: 18px; max-width: 1100px; margin: 0 auto; }
-.card { background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.10); border-radius: 14px; padding: 16px; backdrop-filter: blur(10px); }
-.login-card { max-width: 420px; margin: 40px auto; display:flex; flex-direction:column; gap:12px; }
-.field { display:flex; flex-direction:column; gap:6px; }
-input { background: rgba(0,0,0,.35); border: 1px solid rgba(255,255,255,.14); border-radius: 10px; padding: 10px 12px; color: #e6e9f2; outline: none; }
-input:focus { border-color: rgba(124,92,255,.7); box-shadow: 0 0 0 3px rgba(124,92,255,.18); }
-.btn { background: rgba(255,255,255,.10); border: 1px solid rgba(255,255,255,.14); color: #e6e9f2; border-radius: 10px; padding: 10px 12px; cursor:pointer; }
-.btn:hover { background: rgba(255,255,255,.14); }
-.btn:disabled { opacity:.6; cursor:not-allowed; }
-.btn.primary { background: rgba(124,92,255,.85); border-color: rgba(124,92,255,1); }
-.btn.primary:hover { background: rgba(124,92,255,.95); }
-.btn.small { padding: 6px 10px; font-size: 12px; border-radius: 9px; }
-.error { color: #ffb4b4; background: rgba(255,80,80,.10); border: 1px solid rgba(255,80,80,.20); padding: 10px 12px; border-radius: 10px; }
-.muted { opacity:.8; }
-.hint { opacity:.8; font-size: 12px; }
-.layout { display:grid; grid-template-columns: 220px 1fr; gap: 14px; }
-.sidebar { display:flex; flex-direction:column; gap:8px; }
-.tab { text-align:left; width:100%; }
-.tab.active { background: rgba(124,92,255,.35); border-color: rgba(124,92,255,.55); }
-.row { display:flex; align-items:center; gap:12px; margin-bottom: 12px; }
-.tree { display:flex; flex-direction:column; gap:6px; }
-.tree-node { display:flex; flex-direction:column; }
-.tree-line { display:flex; align-items:center; gap:8px; padding: 6px 8px; border-radius: 10px; }
-.tree-line:hover { background: rgba(255,255,255,.06); }
-.tree-children { padding-left: 18px; display:flex; flex-direction:column; gap:6px; }
-.icon-btn { width: 26px; height: 26px; border-radius: 9px; background: rgba(255,255,255,.08); border: 1px solid rgba(255,255,255,.12); color:#e6e9f2; cursor:pointer; }
-.icon-placeholder { display:inline-block; width: 26px; }
-.onlyoffice-shell { height: calc(100vh - 64px); }
-.onlyoffice-top { display:flex; align-items:center; gap: 12px; margin-bottom: 10px; }
-.onlyoffice-host { height: calc(100vh - 140px); border-radius: 14px; overflow:hidden; border: 1px solid rgba(255,255,255,.10); }
-.link { color:#c9c4ff; text-decoration:none; }
-.link:hover { text-decoration: underline; }
+.content { padding: 10px; }
+.login-card { max-width: 380px; margin: 80px auto; display: flex; flex-direction: column; gap: 10px; background: #fff; border: 1px solid #ddd; border-radius: 10px; padding: 16px; }
+input { padding: 9px 11px; border: 1px solid #cfcfcf; border-radius: 8px; }
+.workbench { display: grid; grid-template-columns: 220px 320px 1fr; gap: 10px; height: calc(100vh - 78px); }
+.left-nav { background: #4a3524; border-radius: 10px; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+.nav-item { border: none; text-align: left; background: rgba(255, 255, 255, 0.08); color: #f7ecd8; padding: 9px 10px; border-radius: 8px; cursor: pointer; }
+.nav-item.active { background: #f4e9d1; color: #4a3524; font-weight: 700; }
+.nav-item.muted { opacity: .76; }
+.tree-pane, .editor-pane { background: #f5efe2; border: 1px solid #d6c8ac; border-radius: 10px; padding: 10px; display: flex; flex-direction: column; overflow: hidden; }
+.pane-header { display: flex; align-items: center; gap: 8px; justify-content: space-between; margin-bottom: 10px; }
+.tree-list { overflow: auto; padding-right: 6px; }
+.tree-line { padding: 6px 8px; border-radius: 6px; cursor: pointer; display: flex; align-items: center; gap: 6px; }
+.tree-line:hover { background: #ecdfc8; }
+.tree-line.active { background: #dbc6a0; font-weight: 700; }
+.arrow { width: 12px; }
+.tree-children { padding-left: 16px; }
+.btn { border: 1px solid #bca988; border-radius: 8px; background: #f5e8d1; padding: 6px 10px; cursor: pointer; }
+.btn.primary { background: #7c5cff; color: #fff; border-color: #7c5cff; }
+.btn.small { padding: 4px 8px; font-size: 12px; }
+.error { color: #9a2323; background: #ffe7e7; border: 1px solid #f2b3b3; border-radius: 8px; padding: 8px; }
+.empty, .welcome { color: #6f6147; padding: 12px; }
+.onlyoffice-host { flex: 1; min-height: 300px; border-radius: 8px; border: 1px solid #d2c4aa; overflow: hidden; background: #fff; }
+.context-menu { position: fixed; z-index: 20; min-width: 180px; background: #fff; border: 1px solid #cebda0; border-radius: 8px; box-shadow: 0 8px 20px rgba(0, 0, 0, .15); padding: 6px; display: flex; flex-direction: column; }
+.menu-item { text-align: left; border: none; background: transparent; border-radius: 6px; padding: 8px; cursor: pointer; }
+.menu-item:hover { background: #f4ead7; }
+.menu-item.danger { color: #9a2323; }
+.hidden-file { position: fixed; left: -9999px; top: -9999px; }
 </style>
 

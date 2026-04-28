@@ -30,6 +30,7 @@ class PersonalLibraryMountKind(models.TextChoices):
 
 class SharedFolder(models.Model):
     name = models.CharField(max_length=255)
+    space_type = models.CharField(max_length=16, choices=SpaceType.choices, default=SpaceType.SHARED)
     creator = models.ForeignKey(User, on_delete=models.CASCADE, related_name="shared_folders")
     parent = models.ForeignKey("self", blank=True, null=True, on_delete=models.CASCADE, related_name="children")
     storage_path = models.CharField(max_length=1024)
@@ -38,7 +39,7 @@ class SharedFolder(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        unique_together = ("parent", "name")
+        unique_together = ("parent", "name", "space_type")
 
     def __str__(self) -> str:
         return self.name

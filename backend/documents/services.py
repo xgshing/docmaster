@@ -94,6 +94,8 @@ def folder_permission_level(user, folder: SharedFolder | None) -> str:
         return "none"
     if user.role == Role.SUPER_ADMIN:
         return "manage"
+    if folder.space_type == "personal":
+        return "manage" if folder.creator_id == user.id else "none"
     if folder.creator_id == user.id:
         return "manage"
 
@@ -163,10 +165,19 @@ def get_accessible_folders(user):
     group_ids = get_user_group_ids(user)
     return (
         SharedFolder.objects.select_related("creator", "parent")
-        .filter(Q(creator=user) | Q(permissions__user=user) | Q(permissions__group_id__in=group_ids))
+        .filter(
+            Q(space_type="personal", creator=user)
+            | Q(space_type="shared", creator=user)
+            | Q(space_type="shared", permissions__user=user)
+            | Q(space_type="shared", permissions__group_id__in=group_ids)
+        )
         .distinct()
         .order_by("name")
     )
+
+
+def get_accessible_folders_for_space(user, space_type: str):
+    return get_accessible_folders(user).filter(space_type=space_type)
 
 
 def unique_shared_name(name: str, conflict_strategy: str = "cancel") -> tuple[str, Document | None]:
@@ -192,7 +203,10 @@ def write_uploaded_file(target: Path, uploaded_file):
 
 
 def build_storage_path(folder: SharedFolder | None, filename: str) -> Path:
-    root = Path(folder.storage_path) if folder else settings.DOCMASTER_SHARED_ROOT
+    if folder:
+        root = Path(folder.storage_path)
+    else:
+        root = settings.DOCMASTER_SHARED_ROOT
     root.mkdir(parents=True, exist_ok=True)
     return root / filename
 
@@ -284,7 +298,7 @@ def recycle_shared_folder(folder: SharedFolder, deleted_by):
     folder_ids = collect_descendant_ids(folder)
     documents = list(
         Document.objects.select_related("folder")
-        .filter(folder_id__in=folder_ids, space_type="shared", is_deleted=False)
+        .filter(folder_id__in=folder_ids, is_deleted=False)
         .order_by("id")
     )
     for document in documents:

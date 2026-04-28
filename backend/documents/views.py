@@ -7,6 +7,7 @@ from django.shortcuts import get_object_or_404
 from rest_framework import generics, parsers, response, status, views
 from rest_framework.exceptions import PermissionDenied
 
+from accounts.models import Role
 from accounts.permissions import IsAdminOrSuperAdmin
 from audit.models import AuditLog
 from .models import (
@@ -41,6 +42,7 @@ from .services import (
     create_or_sync_personal_mount,
     create_or_replace_shared_document,
     document_permission_level,
+    detect_file_type,
     ensure_permission,
     export_document_to_pdf,
     get_accessible_documents,
@@ -90,28 +92,57 @@ class SharedFolderListCreateView(generics.ListCreateAPIView):
     serializer_class = SharedFolderSerializer
 
     def get_queryset(self):
-        return get_accessible_folders(self.request.user)
+        space_type = self.request.query_params.get("space_type", "").strip() or "shared"
+        return get_accessible_folders(self.request.user).filter(space_type=space_type)
 
     def perform_create(self, serializer):
+        space_type = serializer.validated_data.get("space_type") or "shared"
+        if space_type == "shared" and self.request.user.role not in {Role.ADMIN, Role.SUPER_ADMIN}:
+            raise PermissionDenied("仅管理员可在共享空间创建目录。")
         parent = serializer.validated_data.get("parent")
         if parent:
+            if parent.space_type != space_type:
+                raise PermissionDenied("父级目录空间类型不匹配。")
             ensure_permission(self.request.user, folder=parent, level="manage")
             storage_path = str(Path(parent.storage_path) / serializer.validated_data["name"])
         else:
-            storage_path = str(settings.DOCMASTER_SHARED_ROOT / serializer.validated_data["name"])
+            if space_type == "personal":
+                storage_path = str(settings.DOCMASTER_STORAGE_ROOT / "personal" / str(self.request.user.id) / serializer.validated_data["name"])
+            else:
+                storage_path = str(settings.DOCMASTER_SHARED_ROOT / serializer.validated_data["name"])
         Path(storage_path).mkdir(parents=True, exist_ok=True)
-        serializer.save(creator=self.request.user, storage_path=storage_path)
+        serializer.save(creator=self.request.user, storage_path=storage_path, space_type=space_type)
 
 
-class SharedFolderDetailView(generics.RetrieveDestroyAPIView):
+class SharedFolderDetailView(generics.RetrieveUpdateDestroyAPIView):
     serializer_class = SharedFolderSerializer
 
     def get_queryset(self):
         return get_accessible_folders(self.request.user)
 
-    def perform_destroy(self, instance):
+    def perform_update(self, serializer):
+        instance = self.get_object()
+        if instance.space_type == "shared" and self.request.user.role not in {Role.ADMIN, Role.SUPER_ADMIN}:
+            raise PermissionDenied("仅管理员可修改共享空间目录。")
         ensure_permission(self.request.user, folder=instance, level="manage")
-        instance.delete()
+        name = serializer.validated_data.get("name", instance.name).strip()
+        parent = instance.parent
+        base = Path(parent.storage_path) if parent else (
+            settings.DOCMASTER_STORAGE_ROOT / "personal" / str(instance.creator_id)
+            if instance.space_type == "personal"
+            else settings.DOCMASTER_SHARED_ROOT
+        )
+        new_storage = str(base / name)
+        old_storage = Path(instance.storage_path)
+        if old_storage.exists() and old_storage != Path(new_storage):
+            old_storage.rename(new_storage)
+        serializer.save(storage_path=new_storage)
+
+    def perform_destroy(self, instance):
+        if instance.space_type == "shared" and self.request.user.role not in {Role.ADMIN, Role.SUPER_ADMIN}:
+            raise PermissionDenied("仅管理员可删除共享空间目录。")
+        ensure_permission(self.request.user, folder=instance, level="manage")
+        recycle_shared_folder(instance, self.request.user)
 
 
 class SharedPermissionListCreateView(generics.ListCreateAPIView):
@@ -308,8 +339,9 @@ class PersonalLibrarySessionOnlyOfficeCallbackView(views.APIView):
 
 class SharedTreeView(views.APIView):
     def get(self, request):
-        folders = list(get_accessible_folders(request.user))
-        documents = list(get_accessible_documents(request.user).filter(space_type="shared"))
+        space_type = request.query_params.get("space_type", "").strip() or "shared"
+        folders = list(get_accessible_folders(request.user).filter(space_type=space_type))
+        documents = list(get_accessible_documents(request.user).filter(space_type=space_type))
         roots, children = serialize_tree(folders, documents, request.user)
         return response.Response({"roots": roots, "children": children})
 
@@ -326,16 +358,45 @@ class DocumentUploadView(views.APIView):
         folder_id = request.data.get("folder")
         if folder_id:
             folder = get_object_or_404(SharedFolder, pk=folder_id)
-            ensure_permission(request.user, folder=folder, level="edit")
+            if folder.space_type == "shared" and request.user.role not in {Role.ADMIN, Role.SUPER_ADMIN}:
+                raise PermissionDenied("仅管理员可上传共享空间文件。")
+            ensure_permission(request.user, folder=folder, level="manage")
+
+        space_type = request.data.get("space_type", "").strip() or (folder.space_type if folder else "shared")
+        if space_type == "shared" and request.user.role not in {Role.ADMIN, Role.SUPER_ADMIN}:
+            raise PermissionDenied("仅管理员可上传共享空间文件。")
+        if folder and folder.space_type != space_type:
+            raise PermissionDenied("目录与文件空间类型不匹配。")
 
         conflict_strategy = request.data.get("conflict_strategy", "cancel")
-        document = create_or_replace_shared_document(
-            uploaded_file=upload,
-            owner=request.user,
-            folder=folder,
-            filename=request.data.get("name") or upload.name,
-            conflict_strategy=conflict_strategy,
-        )
+        if space_type == "shared":
+            document = create_or_replace_shared_document(
+                uploaded_file=upload,
+                owner=request.user,
+                folder=folder,
+                filename=request.data.get("name") or upload.name,
+                conflict_strategy=conflict_strategy,
+            )
+        else:
+            if not folder:
+                return response.Response({"detail": "个人空间上传需指定目录。"}, status=status.HTTP_400_BAD_REQUEST)
+            ensure_permission(request.user, folder=folder, level="manage")
+            filename = Path(str(request.data.get("name") or upload.name)).name
+            target = Path(folder.storage_path) / filename
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with target.open("wb") as handle:
+                for chunk in upload.chunks():
+                    handle.write(chunk)
+            document = Document.objects.create(
+                name=filename,
+                file_type=detect_file_type(filename),
+                file_size=getattr(upload, "size", 0),
+                storage_path=str(target),
+                space_type="personal",
+                folder=folder,
+                owner=request.user,
+                last_edited_by=request.user,
+            )
         return response.Response(DocumentSerializer(document, context={"request": request}).data, status=201)
 
 
@@ -430,7 +491,9 @@ class ForceUnlockDocumentView(views.APIView):
 
 class DeleteSharedDocumentView(views.APIView):
     def post(self, request, pk: int):
-        document = get_object_or_404(Document.objects.select_related("folder"), pk=pk, space_type="shared")
+        document = get_object_or_404(Document.objects.select_related("folder"), pk=pk)
+        if document.space_type == "shared" and request.user.role not in {Role.ADMIN, Role.SUPER_ADMIN}:
+            raise PermissionDenied("仅管理员可删除共享空间文件。")
         ensure_permission(request.user, document=document, level="manage")
         recycle_shared_document(document, request.user)
         return response.Response(status=status.HTTP_204_NO_CONTENT)
@@ -442,6 +505,8 @@ class DeleteSharedFolderView(views.APIView):
             SharedFolder.objects.select_related("parent", "creator").prefetch_related("children"),
             pk=pk,
         )
+        if folder.space_type == "shared" and request.user.role not in {Role.ADMIN, Role.SUPER_ADMIN}:
+            raise PermissionDenied("仅管理员可删除共享空间目录。")
         ensure_permission(request.user, folder=folder, level="manage")
         recycle_shared_folder(folder, request.user)
         return response.Response(status=status.HTTP_204_NO_CONTENT)

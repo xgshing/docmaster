@@ -23,6 +23,7 @@ class SharedFolderSerializer(serializers.ModelSerializer):
         fields = [
             "id",
             "name",
+            "space_type",
             "creator",
             "creator_name",
             "parent",
