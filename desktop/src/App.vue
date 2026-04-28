@@ -422,7 +422,7 @@ const TreeNode = defineComponent({
         <aside class="left-nav">
           <button
             class="nav-item"
-            :class="{ active: activeMenu === 'personal' }"
+            :class="{ active: activeMenu === 'personal', 'with-tree': activeMenu === 'personal' && !!trees.personal.roots.length }"
             @click="activeMenu = 'personal'"
             @contextmenu="onNavContextmenu($event, 'personal')"
           >
@@ -446,7 +446,7 @@ const TreeNode = defineComponent({
 
           <button
             class="nav-item"
-            :class="{ active: activeMenu === 'shared' }"
+            :class="{ active: activeMenu === 'shared', 'with-tree': activeMenu === 'shared' && !!trees.shared.roots.length }"
             @click="activeMenu = 'shared'"
             @contextmenu="onNavContextmenu($event, 'shared')"
           >
@@ -525,28 +525,29 @@ const TreeNode = defineComponent({
 .login-card { max-width: 380px; margin: 80px auto; display: flex; flex-direction: column; gap: 10px; background: #fff; border: 1px solid #ddd; border-radius: 10px; padding: 16px; }
 input { padding: 9px 11px; border: 1px solid #cfcfcf; border-radius: 8px; }
 .workbench { display: grid; grid-template-columns: 270px 1fr; gap: 10px; height: calc(100vh - 78px); }
-.left-nav { background: #4a3524; border-radius: 10px; padding: 10px; display: flex; flex-direction: column; gap: 6px; overflow: auto; }
-.nav-item { border: none; text-align: left; background: rgba(255, 255, 255, 0.08); color: #f7ecd8; padding: 10px 12px; border-radius: 8px; cursor: pointer; font-size: 14px; line-height: 20px; font-weight: 600; letter-spacing: .1px; }
-.nav-item.active { background: #f4e9d1; color: #4a3524; font-weight: 700; }
+.left-nav { background: #4a3524; border-radius: 10px; padding: 12px; display: flex; flex-direction: column; gap: 8px; overflow: auto; }
+.nav-item { border: none; text-align: left; background: rgba(255, 255, 255, 0.08); color: #f7ecd8; padding: 10px 14px; border-radius: 9px; cursor: pointer; font-size: 14px; line-height: 20px; font-weight: 600; letter-spacing: .1px; }
+.nav-item.active { background: #6b563d; color: #fff4dd; font-weight: 700; box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .12); }
+.nav-item.active.with-tree { border-radius: 12px 12px 0 0; margin-bottom: -8px; padding-bottom: 12px; }
 .nav-item.muted { opacity: .76; }
-.nav-tree { color: #f7ecd8; max-height: 46vh; overflow: auto; padding: 2px 0 8px 8px; border-left: 1px solid rgba(244, 233, 209, .24); }
-.nav-empty { color: rgba(247, 236, 216, .72); font-size: 12px; padding: 8px 6px; }
-.nav-error { color: #ffd7d7; background: rgba(154, 35, 35, .35); border: 1px solid rgba(255, 180, 180, .35); border-radius: 8px; padding: 8px; font-size: 12px; word-break: break-word; }
+.nav-tree { background: #e8e7e2; color: #2f2f2d; max-height: 58vh; overflow: auto; padding: 4px 0 6px; border: 1px solid rgba(77, 65, 50, .28); border-top: none; border-radius: 0 0 2px 2px; box-shadow: inset 0 1px 0 rgba(255, 255, 255, .55); }
+.nav-empty { color: #756f65; font-size: 11px; padding: 8px 10px; }
+.nav-error { color: #8a2222; background: #ffe7e7; border: 1px solid #e3a4a4; border-radius: 8px; padding: 8px; font-size: 11px; word-break: break-word; margin: 4px; }
 .nav-placeholder { color: rgba(247, 236, 216, .76); font-size: 12px; padding: 2px 8px 8px; }
 .editor-pane { background: #f5efe2; border: 1px solid #d6c8ac; border-radius: 10px; padding: 10px; display: flex; flex-direction: column; overflow: hidden; }
 .pane-header { display: flex; align-items: center; gap: 8px; justify-content: space-between; margin-bottom: 10px; }
 .tree-node { position: relative; }
-.tree-line { min-height: 24px; padding: 3px 8px 3px 4px; border-radius: 6px; cursor: pointer; display: flex; align-items: center; gap: 4px; font-size: 11px; line-height: 16px; color: rgba(247, 236, 216, .86); }
-.tree-line:hover { background: rgba(255, 255, 255, .10); }
-.tree-line.active { background: #f4e9d1; color: #4a3524; font-weight: 700; }
-.folder-line { font-weight: 500; }
-.document-line { font-weight: 400; color: rgba(247, 236, 216, .82); }
-.arrow { width: 11px; flex: 0 0 11px; color: rgba(247, 236, 216, .68); font-family: Consolas, monospace; font-size: 12px; transition: transform .12s ease; transform-origin: center; }
+.tree-line { min-height: 22px; padding: 2px 8px 2px 5px; cursor: pointer; display: flex; align-items: center; gap: 3px; font-size: 11px; line-height: 16px; color: #2f2f2d; }
+.tree-line:hover { background: #d8d6ce; }
+.tree-line.active { background: #c9c6bc; color: #1f1f1d; font-weight: 600; }
+.folder-line { font-weight: 600; }
+.document-line { font-weight: 400; color: #343432; }
+.arrow { width: 12px; flex: 0 0 12px; color: #555044; font-family: Consolas, monospace; font-size: 12px; transition: transform .12s ease; transform-origin: center; }
 .arrow.expanded { transform: rotate(90deg); }
-.node-icon { width: 14px; flex: 0 0 14px; opacity: .86; font-size: 12px; }
+.node-icon { width: 15px; flex: 0 0 15px; opacity: .86; font-size: 12px; }
 .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.tree-children { position: relative; margin-left: 22px; padding-left: 13px; }
-.tree-children::before { content: ''; position: absolute; left: 3px; top: 0; bottom: 7px; width: 1px; background: rgba(244, 233, 209, .26); }
+.tree-children { position: relative; margin-left: 0; padding-left: 24px; }
+.tree-children::before { content: ''; position: absolute; left: 14px; top: 0; bottom: 7px; width: 1px; background: #c5c0b5; }
 .btn { border: 1px solid #bca988; border-radius: 8px; background: #f5e8d1; padding: 6px 10px; cursor: pointer; }
 .btn.primary { background: #7c5cff; color: #fff; border-color: #7c5cff; }
 .btn.small { padding: 4px 8px; font-size: 12px; }
