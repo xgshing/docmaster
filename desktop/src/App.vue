@@ -67,7 +67,6 @@ const uploadInput = ref<HTMLInputElement | null>(null)
 
 const isAdminLike = computed(() => user.value?.role === 'admin' || user.value?.role === 'super_admin')
 const activeSpace = computed<SpaceKey | null>(() => (activeMenu.value === 'personal' || activeMenu.value === 'shared' ? activeMenu.value : null))
-const activeTree = computed(() => (activeSpace.value ? trees[activeSpace.value] : { roots: [], children: {} }))
 
 function apiUrl(pathname: string) {
   const base = API_BASE_URL || window.location.origin
@@ -385,34 +384,58 @@ const TreeNode = defineComponent({
       <section v-else class="workbench">
         <aside class="left-nav">
           <button class="nav-item" :class="{ active: activeMenu === 'personal' }" @click="activeMenu = 'personal'">个人文档库</button>
-          <button class="nav-item" :class="{ active: activeMenu === 'shared' }" @click="activeMenu = 'shared'">共享空间</button>
-          <button class="nav-item" :class="{ active: activeMenu === 'recycle' }" @click="activeMenu = 'recycle'">回收站</button>
-          <button class="nav-item muted" :class="{ active: activeMenu === 'archive' }" @click="activeMenu = 'archive'">归档视图（占位）</button>
-          <button class="nav-item muted" :class="{ active: activeMenu === 'admin' }" @click="activeMenu = 'admin'">管理中心（占位）</button>
-        </aside>
-
-        <section class="tree-pane">
-          <div class="pane-header">
-            <strong>{{ activeMenu === 'personal' ? '个人文档库' : activeMenu === 'shared' ? '共享空间' : '功能区' }}</strong>
-            <button v-if="activeSpace" class="btn small" @click="loadTree(activeSpace)">刷新</button>
-          </div>
-          <div v-if="treeError" class="error">{{ treeError }}</div>
-          <div v-if="!activeSpace" class="empty">该模块首版暂为占位。</div>
-          <div v-else-if="treeLoading" class="empty">目录加载中...</div>
-          <div v-else class="tree-list" @contextmenu.prevent="activeSpace && canManage(activeSpace) ? createFolder() : null">
+          <div v-if="activeMenu === 'personal'" class="nav-tree" @contextmenu.prevent="canManage('personal') ? createFolder() : null">
+            <div class="tree-toolbar">
+              <span>目录</span>
+              <button class="mini-btn" @click="loadTree('personal')">刷新</button>
+            </div>
+            <div v-if="treeError" class="nav-error">{{ treeError }}</div>
+            <div v-else-if="treeLoading" class="nav-empty">目录加载中...</div>
             <TreeNode
-              v-for="root in activeTree.roots"
-              :key="`${activeSpace}-${root.kind}-${root.id}`"
+              v-for="root in trees.personal.roots"
+              :key="`personal-${root.kind}-${root.id}`"
               :node="root"
-              :children-map="activeTree.children"
-              :space="activeSpace"
+              :children-map="trees.personal.children"
+              space="personal"
               :selected-doc-id="selectedDoc?.id || 0"
               @toggle="toggleFolder"
               @open-doc="openDocument"
               @node-contextmenu="onNodeContextmenu"
             />
+            <div v-if="!treeLoading && !trees.personal.roots.length" class="nav-empty">右键空白处新建文件夹</div>
           </div>
-        </section>
+
+          <button class="nav-item" :class="{ active: activeMenu === 'shared' }" @click="activeMenu = 'shared'">共享空间</button>
+          <div v-if="activeMenu === 'shared'" class="nav-tree" @contextmenu.prevent="canManage('shared') ? createFolder() : null">
+            <div class="tree-toolbar">
+              <span>目录</span>
+              <button class="mini-btn" @click="loadTree('shared')">刷新</button>
+            </div>
+            <div v-if="treeError" class="nav-error">{{ treeError }}</div>
+            <div v-else-if="treeLoading" class="nav-empty">目录加载中...</div>
+            <TreeNode
+              v-for="root in trees.shared.roots"
+              :key="`shared-${root.kind}-${root.id}`"
+              :node="root"
+              :children-map="trees.shared.children"
+              space="shared"
+              :selected-doc-id="selectedDoc?.id || 0"
+              @toggle="toggleFolder"
+              @open-doc="openDocument"
+              @node-contextmenu="onNodeContextmenu"
+            />
+            <div v-if="!treeLoading && !trees.shared.roots.length" class="nav-empty">
+              {{ canManage('shared') ? '右键空白处新建文件夹' : '暂无共享目录' }}
+            </div>
+          </div>
+
+          <button class="nav-item" :class="{ active: activeMenu === 'recycle' }" @click="activeMenu = 'recycle'">回收站</button>
+          <div v-if="activeMenu === 'recycle'" class="nav-placeholder">回收站列表后续接入。</div>
+          <button class="nav-item muted" :class="{ active: activeMenu === 'archive' }" @click="activeMenu = 'archive'">归档视图（占位）</button>
+          <div v-if="activeMenu === 'archive'" class="nav-placeholder">该模块首版暂为占位。</div>
+          <button class="nav-item muted" :class="{ active: activeMenu === 'admin' }" @click="activeMenu = 'admin'">管理中心（占位）</button>
+          <div v-if="activeMenu === 'admin'" class="nav-placeholder">该模块首版暂为占位。</div>
+        </aside>
 
         <section class="editor-pane">
           <div class="pane-header">
@@ -455,17 +478,22 @@ const TreeNode = defineComponent({
 .content { padding: 10px; }
 .login-card { max-width: 380px; margin: 80px auto; display: flex; flex-direction: column; gap: 10px; background: #fff; border: 1px solid #ddd; border-radius: 10px; padding: 16px; }
 input { padding: 9px 11px; border: 1px solid #cfcfcf; border-radius: 8px; }
-.workbench { display: grid; grid-template-columns: 220px 320px 1fr; gap: 10px; height: calc(100vh - 78px); }
-.left-nav { background: #4a3524; border-radius: 10px; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+.workbench { display: grid; grid-template-columns: 260px 1fr; gap: 10px; height: calc(100vh - 78px); }
+.left-nav { background: #4a3524; border-radius: 10px; padding: 12px; display: flex; flex-direction: column; gap: 8px; overflow: auto; }
 .nav-item { border: none; text-align: left; background: rgba(255, 255, 255, 0.08); color: #f7ecd8; padding: 9px 10px; border-radius: 8px; cursor: pointer; }
 .nav-item.active { background: #f4e9d1; color: #4a3524; font-weight: 700; }
 .nav-item.muted { opacity: .76; }
-.tree-pane, .editor-pane { background: #f5efe2; border: 1px solid #d6c8ac; border-radius: 10px; padding: 10px; display: flex; flex-direction: column; overflow: hidden; }
+.nav-tree { color: #f7ecd8; min-height: 130px; max-height: 45vh; overflow: auto; padding: 4px 2px 8px 6px; border-left: 2px solid rgba(244, 233, 209, .35); }
+.tree-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; opacity: .92; padding: 2px 4px 6px; }
+.mini-btn { border: 1px solid rgba(255, 255, 255, .18); color: #f7ecd8; background: rgba(255, 255, 255, .08); border-radius: 6px; padding: 3px 7px; cursor: pointer; }
+.nav-empty { color: rgba(247, 236, 216, .72); font-size: 12px; padding: 8px 6px; }
+.nav-error { color: #ffd7d7; background: rgba(154, 35, 35, .35); border: 1px solid rgba(255, 180, 180, .35); border-radius: 8px; padding: 8px; font-size: 12px; word-break: break-word; }
+.nav-placeholder { color: rgba(247, 236, 216, .76); font-size: 12px; padding: 2px 8px 8px; }
+.editor-pane { background: #f5efe2; border: 1px solid #d6c8ac; border-radius: 10px; padding: 10px; display: flex; flex-direction: column; overflow: hidden; }
 .pane-header { display: flex; align-items: center; gap: 8px; justify-content: space-between; margin-bottom: 10px; }
-.tree-list { overflow: auto; padding-right: 6px; }
 .tree-line { padding: 6px 8px; border-radius: 6px; cursor: pointer; display: flex; align-items: center; gap: 6px; }
-.tree-line:hover { background: #ecdfc8; }
-.tree-line.active { background: #dbc6a0; font-weight: 700; }
+.tree-line:hover { background: rgba(255, 255, 255, .10); }
+.tree-line.active { background: #f4e9d1; color: #4a3524; font-weight: 700; }
 .arrow { width: 12px; }
 .tree-children { padding-left: 16px; }
 .btn { border: 1px solid #bca988; border-radius: 8px; background: #f5e8d1; padding: 6px 10px; cursor: pointer; }
