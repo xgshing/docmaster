@@ -62,6 +62,9 @@ const uploadState = reactive({
   visible: false,
   space: 'personal' as SpaceKey,
   folderId: null as number | null,
+  uploading: false,
+  message: '',
+  status: 'idle' as 'idle' | 'uploading' | 'success' | 'error',
 })
 const uploadInput = ref<HTMLInputElement | null>(null)
 
@@ -234,9 +237,27 @@ async function onFilePicked(e: Event) {
   form.append('file', file)
   form.append('folder', String(uploadState.folderId))
   form.append('space_type', uploadState.space)
-  await apiRequest('/api/documents/documents/upload/', { method: 'POST', body: form })
-  target.value = ''
-  await loadTree(uploadState.space)
+  uploadState.uploading = true
+  uploadState.status = 'uploading'
+  uploadState.message = `正在上传 ${file.name}...`
+  try {
+    await apiRequest('/api/documents/documents/upload/', { method: 'POST', body: form })
+    target.value = ''
+    await loadTree(uploadState.space)
+    uploadState.status = 'success'
+    uploadState.message = `${file.name} 上传完成`
+  } catch (error) {
+    uploadState.status = 'error'
+    uploadState.message = (error as Error).message || '上传失败'
+  } finally {
+    uploadState.uploading = false
+    window.setTimeout(() => {
+      if (!uploadState.uploading) {
+        uploadState.status = 'idle'
+        uploadState.message = ''
+      }
+    }, 2600)
+  }
 }
 
 async function loadOnlyOfficeInline() {
@@ -358,7 +379,7 @@ const TreeNode = defineComponent({
           onClick: () => (isFolder ? emit('toggle', n) : emit('open-doc', n, props.space)),
           onContextmenu: (e: MouseEvent) => emit('node-contextmenu', e, n, props.space),
         }, [
-          h('span', { class: 'arrow' }, isFolder && children.length ? (expanded ? '▾' : '▸') : ''),
+          h('span', { class: ['arrow', expanded ? 'expanded' : ''] }, isFolder && children.length ? '>' : ''),
           h('span', { class: 'node-icon' }, isFolder ? '📁' : '📄'),
           h('span', { class: 'name' }, n.name),
         ]),
@@ -488,6 +509,10 @@ const TreeNode = defineComponent({
     </div>
 
     <input ref="uploadInput" class="hidden-file" type="file" @change="onFilePicked" />
+
+    <div v-if="uploadState.message" class="upload-toast" :class="uploadState.status">
+      {{ uploadState.message }}
+    </div>
   </div>
 </template>
 
@@ -504,23 +529,24 @@ input { padding: 9px 11px; border: 1px solid #cfcfcf; border-radius: 8px; }
 .nav-item { border: none; text-align: left; background: rgba(255, 255, 255, 0.08); color: #f7ecd8; padding: 10px 12px; border-radius: 8px; cursor: pointer; font-size: 14px; line-height: 20px; font-weight: 600; letter-spacing: .1px; }
 .nav-item.active { background: #f4e9d1; color: #4a3524; font-weight: 700; }
 .nav-item.muted { opacity: .76; }
-.nav-tree { color: #f7ecd8; max-height: 46vh; overflow: auto; padding: 2px 0 8px 6px; border-left: 1px solid rgba(244, 233, 209, .24); }
+.nav-tree { color: #f7ecd8; max-height: 46vh; overflow: auto; padding: 2px 0 8px 8px; border-left: 1px solid rgba(244, 233, 209, .24); }
 .nav-empty { color: rgba(247, 236, 216, .72); font-size: 12px; padding: 8px 6px; }
 .nav-error { color: #ffd7d7; background: rgba(154, 35, 35, .35); border: 1px solid rgba(255, 180, 180, .35); border-radius: 8px; padding: 8px; font-size: 12px; word-break: break-word; }
 .nav-placeholder { color: rgba(247, 236, 216, .76); font-size: 12px; padding: 2px 8px 8px; }
 .editor-pane { background: #f5efe2; border: 1px solid #d6c8ac; border-radius: 10px; padding: 10px; display: flex; flex-direction: column; overflow: hidden; }
 .pane-header { display: flex; align-items: center; gap: 8px; justify-content: space-between; margin-bottom: 10px; }
 .tree-node { position: relative; }
-.tree-line { min-height: 28px; padding: 4px 8px 4px 4px; border-radius: 6px; cursor: pointer; display: flex; align-items: center; gap: 5px; font-size: 12px; line-height: 18px; color: rgba(247, 236, 216, .9); }
+.tree-line { min-height: 24px; padding: 3px 8px 3px 4px; border-radius: 6px; cursor: pointer; display: flex; align-items: center; gap: 4px; font-size: 11px; line-height: 16px; color: rgba(247, 236, 216, .86); }
 .tree-line:hover { background: rgba(255, 255, 255, .10); }
 .tree-line.active { background: #f4e9d1; color: #4a3524; font-weight: 700; }
-.folder-line { font-weight: 600; }
+.folder-line { font-weight: 500; }
 .document-line { font-weight: 400; color: rgba(247, 236, 216, .82); }
-.arrow { width: 12px; flex: 0 0 12px; color: rgba(247, 236, 216, .68); }
-.node-icon { width: 16px; flex: 0 0 16px; opacity: .9; }
+.arrow { width: 11px; flex: 0 0 11px; color: rgba(247, 236, 216, .68); font-family: Consolas, monospace; font-size: 12px; transition: transform .12s ease; transform-origin: center; }
+.arrow.expanded { transform: rotate(90deg); }
+.node-icon { width: 14px; flex: 0 0 14px; opacity: .86; font-size: 12px; }
 .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.tree-children { position: relative; margin-left: 13px; padding-left: 13px; }
-.tree-children::before { content: ''; position: absolute; left: 4px; top: 2px; bottom: 6px; width: 1px; background: rgba(244, 233, 209, .28); }
+.tree-children { position: relative; margin-left: 22px; padding-left: 13px; }
+.tree-children::before { content: ''; position: absolute; left: 3px; top: 0; bottom: 7px; width: 1px; background: rgba(244, 233, 209, .26); }
 .btn { border: 1px solid #bca988; border-radius: 8px; background: #f5e8d1; padding: 6px 10px; cursor: pointer; }
 .btn.primary { background: #7c5cff; color: #fff; border-color: #7c5cff; }
 .btn.small { padding: 4px 8px; font-size: 12px; }
@@ -532,5 +558,9 @@ input { padding: 9px 11px; border: 1px solid #cfcfcf; border-radius: 8px; }
 .menu-item:hover { background: #f4ead7; }
 .menu-item.danger { color: #9a2323; }
 .hidden-file { position: fixed; left: -9999px; top: -9999px; }
+.upload-toast { position: fixed; right: 18px; top: 68px; z-index: 30; min-width: 220px; max-width: 360px; padding: 10px 12px; border-radius: 10px; box-shadow: 0 10px 24px rgba(0, 0, 0, .18); font-size: 13px; line-height: 18px; background: #fff7e6; border: 1px solid #e4c993; color: #5f4316; }
+.upload-toast.uploading { background: #eef4ff; border-color: #adc7f5; color: #244776; }
+.upload-toast.success { background: #eefaf0; border-color: #9fd0a6; color: #285a2d; }
+.upload-toast.error { background: #fff0f0; border-color: #e3a4a4; color: #8a2222; }
 </style>
 
