@@ -1,0 +1,14 @@
+[Unit]
+Description=DocMaster Django Backend
+After=network.target
+
+[Service]
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/docmaster/app/backend
+EnvironmentFile=/opt/docmaster/app/.env
+ExecStart=/opt/docmaster/app/.venv/bin/gunicorn config.wsgi:application --bind 127.0.0.1:8000 --workers 3
+Restart=always
+
+[Install]
+WantedBy=multi-user.target

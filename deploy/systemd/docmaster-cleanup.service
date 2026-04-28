@@ -1,0 +1,10 @@
+[Unit]
+Description=DocMaster cleanup job
+
+[Service]
+Type=oneshot
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/docmaster/app/backend
+EnvironmentFile=/opt/docmaster/app/.env
+ExecStart=/opt/docmaster/app/.venv/bin/python manage.py cleanup_docmaster

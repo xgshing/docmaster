@@ -1,0 +1,9 @@
+.idea/
+backend/db.sqlite3
+backend/runtime/
+backend/**/__pycache__/
+backend/**/*.pyc
+desktop/node_modules/
+desktop/dist/
+desktop/.vite/
+desktop/package-lock.json
