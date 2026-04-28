@@ -408,11 +408,16 @@ class DocumentDetailView(generics.RetrieveAPIView):
 
 
 class DocumentDownloadView(views.APIView):
+    authentication_classes = []
+    permission_classes = []
+
     def get(self, request, pk: int):
         document = get_object_or_404(Document.objects.select_related("folder", "owner"), pk=pk)
         token = request.query_params.get("token", "")
         has_document_token = verify_document_token(token, pk, "download")
         if not has_document_token:
+            if not request.user.is_authenticated:
+                raise PermissionDenied("您没有执行该操作的权限。")
             ensure_permission(request.user, document=document, level="view")
             append_access_log(document, request.user, "download")
         file_handle = ensure_document_cached(document).open("rb")
